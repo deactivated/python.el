@@ -1421,9 +1421,17 @@ Optional argument JUSTIFY defines if the paragraph should be justified."
             ;; quote in it's own line to follow pep 8
             (when (save-excursion
                     (re-search-backward "\n" string-start-marker t))
-              (newline)
-              (newline-and-indent))
-            (fill-paragraph justify)))) t)
+              (newline-and-indent)
+              (when (looking-at "[\"']$")
+                (insert-before-markers (make-string 2 (nth 3 (syntax-ppss)))))
+              (goto-char string-start-marker)
+              (skip-chars-backward "uUrR")
+              (when (looking-back "\\(^\\|[^\"']\\)[\"']")
+                (insert-before-markers (make-string 2 (nth 3 (syntax-ppss)))))
+              (newline-and-indent)
+              (fill-region string-start-marker
+                           string-end-marker
+                           justify))))) t)
      ;; Decorators
      ((equal (char-after (save-excursion
                            (back-to-indentation)
