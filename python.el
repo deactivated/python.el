@@ -142,6 +142,7 @@
     (define-key map (kbd "<backtab>") 'python-indent-dedent-line)
     (define-key map "\C-c<" 'python-indent-shift-left)
     (define-key map "\C-c>" 'python-indent-shift-right)
+    (define-key map ":" 'python-indent-electric-colon)
     ;; Shell interaction
     (define-key map "\C-c\C-s" 'python-shell-send-string)
     (define-key map "\C-c\C-r" 'python-shell-send-region)
@@ -719,24 +720,25 @@ point is not in between the indentation."
   "Indent a python region automagically.
 
 Called from a program, START and END specify the region to indent."
-  (save-excursion
-    (goto-char end)
-    (setq end (point-marker))
-    (goto-char start)
-    (or (bolp) (forward-line 1))
-    (while (< (point) end)
-      (or (and (bolp) (eolp))
-          (let (word)
-	    (forward-line -1)
-	    (back-to-indentation)
-	    (setq word (current-word))
-	    (forward-line 1)
-	    (when word
-	      (beginning-of-line)
-	      (delete-horizontal-space)
-	      (indent-to (python-indent-calculate-indentation)))))
-      (forward-line 1))
-    (move-marker end nil)))
+  (let ((deactivate-mark nil))
+    (save-excursion
+      (goto-char end)
+      (setq end (point-marker))
+      (goto-char start)
+      (or (bolp) (forward-line 1))
+      (while (< (point) end)
+        (or (and (bolp) (eolp))
+            (let (word)
+              (forward-line -1)
+              (back-to-indentation)
+              (setq word (current-word))
+              (forward-line 1)
+              (when word
+                (beginning-of-line)
+                (delete-horizontal-space)
+                (indent-to (python-indent-calculate-indentation)))))
+        (forward-line 1))
+      (move-marker end nil))))
 
 (defun python-indent-shift-left (start end &optional count)
   "Shift lines contained in region START END by COUNT columns to the left.
@@ -757,14 +759,15 @@ than COUNT columns."
       (setq count (prefix-numeric-value count))
     (setq count python-indent-offset))
   (when (> count 0)
-    (save-excursion
-      (goto-char start)
-      (while (< (point) end)
-	(if (and (< (current-indentation) count)
-		 (not (looking-at "[ \t]*$")))
-	    (error "Can't shift all lines enough"))
-	(forward-line))
-      (indent-rigidly start end (- count)))))
+    (let ((deactivate-mark nil))
+      (save-excursion
+        (goto-char start)
+        (while (< (point) end)
+          (if (and (< (current-indentation) count)
+                   (not (looking-at "[ \t]*$")))
+              (error "Can't shift all lines enough"))
+          (forward-line))
+        (indent-rigidly start end (- count))))))
 
 (add-to-list 'debug-ignored-errors "^Can't shift all lines enough")
 
@@ -781,10 +784,25 @@ lie."
    (if mark-active
        (list (region-beginning) (region-end) current-prefix-arg)
      (list (line-beginning-position) (line-end-position) current-prefix-arg)))
-  (if count
-      (setq count (prefix-numeric-value count))
-    (setq count python-indent-offset))
-  (indent-rigidly start end count))
+  (let ((deactivate-mark nil))
+    (if count
+        (setq count (prefix-numeric-value count))
+      (setq count python-indent-offset))
+    (indent-rigidly start end count)))
+
+;; Directly from Dave Love's python.el
+(defun python-indent-electric-colon (arg)
+  "Insert a colon and maybe outdent the line if it is a statement like `else'.
+With numeric ARG, just insert that many colons.  With \\[universal-argument],
+just insert a single colon."
+  (interactive "*P")
+  (self-insert-command (if (not (integerp arg)) 1 arg))
+  (and (not arg)
+       (eolp)
+       (not (nth 8 (syntax-ppss)))
+       (> (current-indentation) (python-indent-calculate-indentation))
+       (save-excursion (python-indent-line))))
+(put 'python-indent-electric-colon 'delete-selection t)
 
 
 ;;; Navigation
