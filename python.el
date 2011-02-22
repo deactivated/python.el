@@ -41,7 +41,9 @@
 
 ;; Indentation: Automatic indentation with indentation cycling is
 ;; provided, it allows you to navigate different available levels of
-;; indentation by hitting <tab> several times.
+;; indentation by hitting <tab> several times.  Also when inserting a
+;; colon the `python-indent-electric-colon' command is invoked and
+;; causes the current line to be dedented automatically if needed.
 
 ;; Movement: `beginning-of-defun' and `end-of-defun' functions are
 ;; properly implemented.  A `beginning-of-innermost-defun' is defined
@@ -65,6 +67,13 @@
 ;; Symbol completion: you can complete the symbol at point.  It uses
 ;; the shell completion in background so you should run
 ;; `python-shell-send-buffer' from time to time to get better results.
+
+;; Skeletons: 6 skeletons are provided for simple inserting of class,
+;; def, for, if, try and while.  These skeletons are integrated with
+;; dabbrev.  If you have `dabbrev-mode' activated and
+;; `python-skeleton-autoinsert' is set to t, then whenever you type
+;; the name of any of those defined and hit SPC, they will be
+;; automatically expanded.
 
 ;; FFAP: You can find the filename for a given module when using ffap
 ;; out of the box.  This feature needs an inferior python shell
@@ -108,16 +117,17 @@
 
 ;; Review code and cleanup
 
-;; (Perhaps) some skeletons (I never use them because of yasnippet)
-
 ;;; Code:
 
-(require 'comint)
 (require 'ansi-color)
-(require 'outline)
+(require 'comint)
 
 (eval-when-compile
-  (require 'cl))
+  (require 'cl)
+  ;; Avoid compiler warnings
+  (defvar view-return-to-alist)
+  (defvar compilation-error-regexp-alist)
+  (defvar outline-heading-end-regexp))
 
 (autoload 'comint-mode "comint")
 
@@ -143,6 +153,13 @@
     (define-key map "\C-c<" 'python-indent-shift-left)
     (define-key map "\C-c>" 'python-indent-shift-right)
     (define-key map ":" 'python-indent-electric-colon)
+    ;; Skeletons
+    (define-key map "\C-c\C-tc" 'python-skeleton-class)
+    (define-key map "\C-c\C-td" 'python-skeleton-def)
+    (define-key map "\C-c\C-tf" 'python-skeleton-for)
+    (define-key map "\C-c\C-ti" 'python-skeleton-if)
+    (define-key map "\C-c\C-tt" 'python-skeleton-try)
+    (define-key map "\C-c\C-tw" 'python-skeleton-while)
     ;; Shell interaction
     (define-key map "\C-c\C-s" 'python-shell-send-string)
     (define-key map "\C-c\C-r" 'python-shell-send-region)
@@ -174,6 +191,8 @@
 	["End of def/class" end-of-defun
 	 :help "Go to end of definition around point"]
         "-"
+	("Skeletons")
+        "-"
 	["Start interpreter" run-python
 	 :help "Run inferior Python process in a separate buffer"]
 	["Switch to shell" python-shell-switch-to-shell
@@ -202,22 +221,23 @@
 
 ;;; Python specialized rx
 
-(defconst python-rx-constituents
-  (list
-   `(block-start          . ,(rx symbol-start
-                               (or "def" "class" "if" "elif" "else" "try"
-                                   "except" "finally" "for" "while" "with")
-                               symbol-end))
-   `(defun                . ,(rx symbol-start (or "def" "class") symbol-end))
-   `(open-paren           . ,(rx (or "{" "[" "(")))
-   `(close-paren          . ,(rx (or "}" "]" ")")))
-   `(simple-operator      . ,(rx (any ?+ ?- ?/ ?& ?^ ?~ ?| ?* ?< ?> ?= ?%)))
-   `(not-simple-operator  . ,(rx (not (any ?+ ?- ?/ ?& ?^ ?~ ?| ?* ?< ?> ?= ?%))))
-   `(operator             . ,(rx (or "+" "-" "/" "&" "^" "~" "|" "*" "<" ">"
-                                     "=" "%" "**" "//" "<<" ">>" "<=" "!="
-                                     "==" ">=" "is" "not")))
-   `(assignment-operator  . ,(rx (or "=" "+=" "-=" "*=" "/=" "//=" "%=" "**="
-                                     ">>=" "<<=" "&=" "^=" "|=")))))
+(eval-when-compile
+  (defconst python-rx-constituents
+    (list
+     `(block-start          . ,(rx symbol-start
+                                   (or "def" "class" "if" "elif" "else" "try"
+                                       "except" "finally" "for" "while" "with")
+                                   symbol-end))
+     `(defun                . ,(rx symbol-start (or "def" "class") symbol-end))
+     `(open-paren           . ,(rx (or "{" "[" "(")))
+     `(close-paren          . ,(rx (or "}" "]" ")")))
+     `(simple-operator      . ,(rx (any ?+ ?- ?/ ?& ?^ ?~ ?| ?* ?< ?> ?= ?%)))
+     `(not-simple-operator  . ,(rx (not (any ?+ ?- ?/ ?& ?^ ?~ ?| ?* ?< ?> ?= ?%))))
+     `(operator             . ,(rx (or "+" "-" "/" "&" "^" "~" "|" "*" "<" ">"
+                                       "=" "%" "**" "//" "<<" ">>" "<=" "!="
+                                       "==" ">=" "is" "not")))
+     `(assignment-operator  . ,(rx (or "=" "+=" "-=" "*=" "/=" "//=" "%=" "**="
+                                       ">>=" "<<=" "&=" "^=" "|="))))))
 
 (defmacro python-rx (&rest regexps)
  "Python mode especialized rx macro which supports common python named REGEXPS."
@@ -1497,6 +1517,138 @@ Optional argument JUSTIFY defines if the paragraph should be justified."
      (t t))))
 
 
+;;; Skeletons
+
+(defcustom python-skeleton-autoinsert nil
+  "Non-nil means template skeletons will be automagically inserted.
+This happens when pressing \"if<SPACE>\", for example, to prompt for
+the if condition."
+  :type 'boolean
+  :group 'python)
+
+(defvar python-skeleton-available '()
+  "Internal list of available skeletons.")
+(make-variable-buffer-local 'inferior-python-mode-current-file)
+
+(define-abbrev-table 'python-mode-abbrev-table ()
+  "Abbrev table for Python mode."
+  :case-fixed t
+  ;; Allow / inside abbrevs.
+  :regexp "\\(?:^\\|[^/]\\)\\<\\([[:word:]/]+\\)\\W*"
+  ;; Only expand in code.
+  :enable-function (lambda ()
+                     (message "ppss %s" (not (nth 8 (syntax-ppss))))
+                     (message "autoinsert %s" python-skeleton-autoinsert)
+                     (and
+                      (not (nth 8 (syntax-ppss)))
+                      python-skeleton-autoinsert)))
+
+(defmacro python-skeleton-define (name doc &rest skel)
+  "Define a `python-mode' skeleton using NAME DOC and SKEL.
+The skeleton will be bound to python-skeleton-NAME and will
+be added to `python-mode-abbrev-table'."
+  (let* ((name (symbol-name name))
+	 (function-name (intern (concat "python-skeleton-" name))))
+    `(progn
+       (define-abbrev python-mode-abbrev-table ,name "" ',function-name)
+       (setq python-skeleton-available
+             (cons ',function-name python-skeleton-available))
+       (define-skeleton ,function-name
+         ,(or doc
+              (format "Insert %s statement." name))
+         ,@skel))))
+(put 'python-skeleton-define 'lisp-indent-function 2)
+
+(defmacro python-define-auxiliary-skeleton (name doc &optional &rest skel)
+  "Define a `python-mode' auxiliary skeleton using NAME DOC and SKEL.
+The skeleton will be bound to python-skeleton-NAME."
+  (let* ((name (symbol-name name))
+	 (function-name (intern (concat "python-skeleton--" name)))
+         (msg (format
+               "Add '%s' clause? " name)))
+    (when (not skel)
+      (setq skel
+            `(< ,(format "%s:" name) \n \n
+                > _ \n)))
+    `(define-skeleton ,function-name
+       ,(or doc
+            (format "Auxiliary skeleton for %s statement." name))
+       nil
+       (unless (y-or-n-p ,msg)
+         (signal 'quit t))
+       ,@skel)))
+(put 'python-define-auxiliary-skeleton 'lisp-indent-function 2)
+
+(python-define-auxiliary-skeleton else nil)
+
+(python-define-auxiliary-skeleton except nil)
+
+(python-define-auxiliary-skeleton finally nil)
+
+(python-skeleton-define if nil
+  "Condition: "
+  "if " str ":" \n
+  _ \n
+  ("other condition, %s: "
+   <
+   "elif " str ":" \n
+   > _ \n nil)
+  '(python-skeleton--else) | ^)
+
+(python-skeleton-define while nil
+  "Condition: "
+  "while " str ":" \n
+  > _ \n
+  '(python-skeleton--else) | ^)
+
+(python-skeleton-define for nil
+  "Iteration spec: "
+  "for " str ":" \n
+  > _ \n
+  '(python-skeleton--else) | ^)
+
+(python-skeleton-define try nil
+  nil
+  "try:" \n
+  > _ \n
+  ("Exception, %s: "
+   <
+   "except " str ":" \n
+   > _ \n nil)
+  resume:
+  '(python-skeleton--except)
+  '(python-skeleton--else)
+  '(python-skeleton--finally) | ^)
+
+(python-skeleton-define def nil
+  "Function name: "
+  "def " str " ("  ("Parameter, %s: "
+                    (unless (equal ?\( (char-before)) ", ")
+		     str) "):" \n
+  "\"\"\"" - "\"\"\"" \n
+  > _ \n)
+
+(python-skeleton-define class nil
+  "Class name: "
+  "class " str " (" ("Inheritance, %s: "
+		     (unless (equal ?\( (char-before)) ", ")
+		     str)
+  & ")" | -2
+  ":" \n
+  "\"\"\"" - "\"\"\"" \n
+  > _ \n)
+
+(defun python-skeleton-add-menu-items ()
+  "Add menu items to Python->Skeletons menu."
+  (let ((skeletons (sort python-skeleton-available 'string<))
+        (items))
+    (dolist (skeleton skeletons)
+      (easy-menu-add-item
+       nil '("Python" "Skeletons")
+       `[,(format
+           "Insert %s" (caddr (split-string (symbol-name skeleton) "-")))
+         ,skeleton t]))))
+
 ;;; FFAP
 
 (defvar python-ffap-setup-code
@@ -1828,6 +1980,12 @@ not inside a defun."
   (set (make-local-variable 'add-log-current-defun-function)
        #'python-info-current-defun)
 
+  (set (make-local-variable 'skeleton-further-elements)
+       '((abbrev-mode nil)
+         (< '(backward-delete-char-untabify (min python-indent-offset
+						 (current-column))))
+	 (^ '(- (1+ (current-indentation))))))
+
   (set (make-local-variable 'eldoc-documentation-function)
        #'python-eldoc-function)
 
@@ -1843,6 +2001,8 @@ not inside a defun."
        #'(lambda ()
            "`outline-level' function for Python mode."
            (1+ (/ (current-indentation) python-indent-offset))))
+
+  (python-skeleton-add-menu-items)
 
   (when python-indent-guess-indent-offset
     (python-indent-guess-indent-offset)))
