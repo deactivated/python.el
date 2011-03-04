@@ -1,6 +1,6 @@
 ;;; python.el -- Python's flying circus support for Emacs
 
-;; Copyright (C) 2010 Free Software Foundation, Inc.
+;; Copyright (C) 2010, 2011 Free Software Foundation, Inc.
 
 ;; Author: Fabián E. Gallina <fabian@anue.biz>
 ;; Maintainer: FSF
@@ -34,7 +34,7 @@
 
 ;; Implements Syntax highlighting, Indentation, Movement, Shell
 ;; interaction, Shell completion, Pdb tracking, Symbol completion,
-;; Eldoc.
+;; Skeletons, FFAP, Code Check, Eldoc.
 
 ;; Syntax highlighting: Fontification of code is provided and supports
 ;; python's triple quoted strings properly.
@@ -77,6 +77,26 @@
 ;; bundles Python without it (like Windows) just install the
 ;; pyreadline from http://ipython.scipy.org/moin/PyReadline/Intro and
 ;; you should be good to go.
+
+;; The shell also contains support for virtualenvs and other special
+;; environment modification thanks to
+;; `python-shell-process-environment' and `python-shell-exec-path'.
+;; These two variables allows you to modify execution paths and
+;; enviroment variables to make easy for you to setup virtualenv rules
+;; or behaviors modifications when running shells.  Here is an example
+;; of how to make shell processes to be run using the /path/to/env/
+;; virtualenv:
+
+;; (setq python-shell-process-environment
+;;       (list
+;;        (format "PATH=%s" (mapconcat
+;;                           'identity
+;;                           (reverse
+;;                            (cons (getenv "PATH")
+;;                                  '("/path/to/env/bin/")))
+;;                           ":"))
+;;        "VIRTUAL_ENV=/path/to/env/"))
+;; (python-shell-exec-path . ("/path/to/env/bin/"))
 
 ;; Pdb tracking: when you execute a block of code that contains some
 ;; call to pdb (or ipdb) it will prompt the block of code and will
@@ -255,7 +275,8 @@
                                        "=" "%" "**" "//" "<<" ">>" "<=" "!="
                                        "==" ">=" "is" "not")))
      `(assignment-operator  . ,(rx (or "=" "+=" "-=" "*=" "/=" "//=" "%=" "**="
-                                       ">>=" "<<=" "&=" "^=" "|="))))))
+                                       ">>=" "<<=" "&=" "^=" "|="))))
+    "Additional Python specific sexps for `python-rx'"))
 
 (defmacro python-rx (&rest regexps)
  "Python mode especialized rx macro which supports common python named REGEXPS."
@@ -498,23 +519,18 @@ These make `python-indent-calculate-indentation' subtract the value of
               (when (> indent-offset 0)
                 (setq python-indent-offset indent-offset))))))))
 
-(defun python-indent-context (&optional stop)
-  "Return information on indentation context.
-Optional argument STOP serves to stop recursive calls.
-
-Returns a cons with the form:
-
-\(STATUS . START)
+(defun python-indent-context ()
+  "Get information on indentation context.
+Context information is returned with a cons with the form:
+    \(STATUS . START)
 
 Where status can be any of the following symbols:
-
  * inside-paren: If point in between (), {} or []
  * inside-string: If point is inside a string
  * after-backslash: Previous line ends in a backslash
  * after-beginning-of-block: Point is after beginning of block
  * after-line: Point is after normal line
  * no-indent: Point is at beginning of buffer or other special case
-
 START is the buffer position where the sexp starts."
   (save-restriction
     (widen)
@@ -684,8 +700,7 @@ START is the buffer position where the sexp starts."
   (let* ((indentation (python-indent-calculate-indentation))
          (remainder (% indentation python-indent-offset))
          (steps (/ (- indentation remainder) python-indent-offset)))
-    (setq python-indent-levels '())
-    (setq python-indent-levels (cons 0 python-indent-levels))
+    (setq python-indent-levels '(0))
     (dotimes (step steps)
       (setq python-indent-levels
             (cons (* python-indent-offset (1+ step)) python-indent-levels)))
@@ -704,31 +719,29 @@ START is the buffer position where the sexp starts."
 
 (defun python-indent-line (&optional force-toggle)
   "Internal implementation of `python-indent-line-function'.
-
 Uses the offset calculated in
 `python-indent-calculate-indentation' and available levels
-indicated by the variable `python-indent-levels'.
+indicated by the variable `python-indent-levels' to set the
+current indentation.
 
 When the variable `last-command' is equal to
-`indent-for-tab-command' or FORCE-TOGGLE is non-nil:
-
-* Cycles levels indicated in the variable `python-indent-levels'
-  by setting the current level in the variable
-  `python-indent-current-level'.
+`indent-for-tab-command' or FORCE-TOGGLE is non-nil it cycles
+levels indicated in the variable `python-indent-levels' by
+setting the current level in the variable
+`python-indent-current-level'.
 
 When the variable `last-command' is not equal to
-`indent-for-tab-command' and FORCE-TOGGLE is nil:
-
-* calculates possible indentation levels and saves it in the
-  variable `python-indent-levels'.
-
-* sets the variable `python-indent-current-level' correctly so
-  offset is equal to (`nth' `python-indent-current-level'
-  `python-indent-levels')"
+`indent-for-tab-command' and FORCE-TOGGLE is nil it calculates
+possible indentation levels and saves it in the variable
+`python-indent-levels'.  Afterwards it sets the variable
+`python-indent-current-level' correctly so offset is equal
+to (`nth' `python-indent-current-level' `python-indent-levels')"
   (if (or (and (eq this-command 'indent-for-tab-command)
                (eq last-command this-command))
           force-toggle)
-      (python-indent-toggle-levels)
+      (if (not (equal python-indent-levels '(0)))
+          (python-indent-toggle-levels)
+        (python-indent-calculate-levels))
     (python-indent-calculate-levels))
   (beginning-of-line)
   (delete-horizontal-space)
@@ -745,11 +758,11 @@ When the variable `last-command' is not equal to
 
 (defun python-indent-line-function ()
   "`indent-line-function' for Python mode.
-Internally just calls `python-indent-line'."
+See `python-indent-line' for details."
   (python-indent-line))
 
 (defun python-indent-dedent-line ()
-  "Dedent current line."
+  "De-indent current line."
   (interactive "*")
   (when (and (not (or (python-info-ppss-context 'string)
                       (python-info-ppss-context 'comment)))
@@ -761,9 +774,9 @@ Internally just calls `python-indent-line'."
     t))
 
 (defun python-indent-dedent-line-backspace (arg)
-  "Dedent current line.
+  "De-indent current line.
 Argument ARG is passed to `backward-delete-char-untabify' when
-point is not in between the indentation."
+point is  not in between the indentation."
   (interactive "*p")
   (when (not (python-indent-dedent-line))
     (backward-delete-char-untabify arg)))
@@ -795,15 +808,10 @@ Called from a program, START and END specify the region to indent."
 
 (defun python-indent-shift-left (start end &optional count)
   "Shift lines contained in region START END by COUNT columns to the left.
-
-COUNT defaults to `python-indent-offset'.
-
-If region isn't active, the current line is shifted.
-
-The shifted region includes the lines in which START and END lie.
-
-An error is signaled if any lines in the region are indented less
-than COUNT columns."
+COUNT defaults to `python-indent-offset'.  If region isn't
+active, the current line is shifted.  The shifted region includes
+the lines in which START and END lie.  An error is signaled if
+any lines in the region are indented less than COUNT columns."
   (interactive
    (if mark-active
        (list (region-beginning) (region-end) current-prefix-arg)
@@ -826,13 +834,9 @@ than COUNT columns."
 
 (defun python-indent-shift-right (start end &optional count)
   "Shift lines contained in region START END by COUNT columns to the left.
-
-COUNT defaults to `python-indent-offset'.
-
-If region isn't active, the current line is shifted.
-
-The shifted region includes the lines in which START and END
-lie."
+COUNT defaults to `python-indent-offset'.  If region isn't
+active, the current line is shifted.  The shifted region includes
+the lines in which START and END lie."
   (interactive
    (if mark-active
        (list (region-beginning) (region-end) current-prefix-arg)
@@ -844,9 +848,9 @@ lie."
     (indent-rigidly start end count)))
 
 (defun python-indent-electric-colon (arg)
-  "Insert a colon and maybe outdent the line if it is a statement like `else'.
-With numeric ARG, just insert that many colons.  With \\[universal-argument],
-just insert a single colon."
+  "Insert a colon and maybe de-indent the current line.
+With numeric ARG, just insert that many colons.  With
+\\[universal-argument], just insert a single colon."
   (interactive "*P")
   (self-insert-command (if (not (integerp arg)) 1 arg))
   (when (and (not arg)
@@ -963,43 +967,83 @@ Returns nil if point is not in a def or class."
 
 (defcustom python-shell-interpreter "python"
   "Default Python interpreter for shell."
-  :group 'python
   :type 'string
+  :group 'python
   :safe 'stringp)
 
 (defcustom python-shell-interpreter-args "-i"
   "Default arguments for the Python interpreter."
-  :group 'python
   :type 'string
+  :group 'python
   :safe 'stringp)
 
 (defcustom python-shell-prompt-regexp ">>> "
-  "Regex matching top\-level input prompt of python shell.
-The regex should not contain a caret (^) at the beginning."
+  "Regular Expression matching top\-level input prompt of python shell.
+It should not contain a caret (^) at the beginning."
   :type 'string
   :group 'python
   :safe 'stringp)
 
 (defcustom python-shell-prompt-block-regexp "[.][.][.] "
-  "Regex matching block input prompt of python shell.
-The regex should not contain a caret (^) at the beginning."
+  "Regular Expression matching block input prompt of python shell.
+It should not contain a caret (^) at the beginning."
   :type 'string
   :group 'python
   :safe 'stringp)
 
 (defcustom python-shell-prompt-output-regexp nil
-  "Regex matching output prompt of python shell.
-The regex should not contain a caret (^) at the beginning."
+  "Regular Expression matching output prompt of python shell.
+It should not contain a caret (^) at the beginning."
   :type 'string
   :group 'python
   :safe 'stringp)
 
 (defcustom python-shell-prompt-pdb-regexp "[(<]*[Ii]?[Pp]db[>)]+ "
-  "Regex matching pdb input prompt of python shell.
-The regex should not contain a caret (^) at the beginning."
+  "Regular Expression matching pdb input prompt of python shell.
+It should not contain a caret (^) at the beginning."
   :type 'string
   :group 'python
   :safe 'stringp)
+
+(defcustom python-shell-send-setup-max-wait 5
+  "Seconds to wait for process output before code setup.
+If output is received before the especified time then control is
+returned in that moment and not after waiting."
+  :type 'number
+  :group 'python
+  :safe 'numberp)
+
+(defcustom python-shell-process-environment nil
+  "List of enviroment variables for Python shell.
+This variable follows the same rules as `process-enviroment'
+since it merges with it before the process creation routines are
+called.  When this variable is nil, the Python shell is run with
+the default `process-enviroment'."
+  :type '(repeat string)
+  :group 'python
+  :safe 'listp)
+
+(defcustom python-shell-exec-path nil
+  "List of path to search for binaries.
+This variable follows the same rules as `exec-path' since it
+merges with it before the process creation routines are called.
+When this variable is nil, the Python shell is run with the
+default `exec-path'."
+  :type '(repeat string)
+  :group 'python
+  :safe 'listp)
+
+(defcustom python-shell-setup-codes '(python-shell-completion-setup-code
+                                      python-ffap-setup-code
+                                      python-eldoc-setup-code)
+  "List of code run by `python-shell-send-setup-codes'.
+Each variable can contain either a simple string with the code to
+execute or a cons with the form (CODE . DESCRIPTION), where CODE
+is a string with the code to execute and DESCRIPTION is the
+description of it."
+  :type '(repeat symbol)
+  :group 'python
+  :safe 'listp)
 
 (defcustom python-shell-compilation-regexp-alist
   `((,(rx line-start (1+ (any " \t")) "File \""
@@ -1018,14 +1062,12 @@ The regex should not contain a caret (^) at the beginning."
 
 (defun python-shell-get-process-name (dedicated)
   "Calculate the appropiate process name for inferior Python process.
-
 If DEDICATED is t and the variable `buffer-file-name' is non-nil
 returns a string with the form
 `python-shell-buffer-name'[variable `buffer-file-name'] else
-returns the value of `python-shell-buffer-name'.
-
-After calculating the process name add the buffer name for the
-process in the `same-window-buffer-names' list"
+returns the value of `python-shell-buffer-name'.  After
+calculating the process name adds the buffer name for the process
+in the `same-window-buffer-names' list."
   (let ((process-name
          (if (and dedicated
                   buffer-file-name)
@@ -1036,7 +1078,7 @@ process in the `same-window-buffer-names' list"
     process-name))
 
 (defun python-shell-parse-command ()
-  "Calculates the string used to execute the inferior Python process."
+  "Calculate the string used to execute the inferior Python process."
   (format "%s %s" python-shell-interpreter python-shell-interpreter-args))
 
 (defun python-comint-output-filter-function (output)
@@ -1050,10 +1092,24 @@ OUTPUT is a string with the contents of the buffer."
 
 (define-derived-mode inferior-python-mode comint-mode "Inferior Python"
   "Major mode for Python inferior process.
-Adds `python-shell-completion-complete-at-point' to the
-`comint-dynamic-complete-functions' list.  Also binds <tab> to
-`python-shell-complete-or-indent' in the
-`inferior-python-mode-map'."
+Runs a Python interpreter as a subprocess of Emacs, with Python
+I/O through an Emacs buffer.  Variables
+`python-shell-interpreter' and `python-shell-interpreter-args'
+controls which Python interpreter is run.  Variables
+`python-shell-prompt-regexp',
+`python-shell-prompt-output-regexp',
+`python-shell-prompt-block-regexp',
+`python-shell-completion-setup-code',
+`python-shell-completion-string-code', `python-eldoc-setup-code',
+`python-eldoc-string-code', `python-ffap-setup-code' and
+`python-ffap-string-code' can customize this mode for different
+Python interpreters.
+
+You can also add additional setup code to be run at
+initialization of the interpreter via `python-shell-setup-codes'
+variable.
+
+\(Type \\[describe-mode] in the process buffer for a list of commands.)"
   (set-syntax-table python-mode-syntax-table)
   (setq mode-line-process '(":%s"))
   (setq comint-prompt-regexp (format "^\\(?:%s\\|%s\\|%s\\)"
@@ -1079,26 +1135,17 @@ Adds `python-shell-completion-complete-at-point' to the
 
 (defun run-python (dedicated cmd)
   "Run an inferior Python process.
-
-Input and output via buffer *\\[python-shell-buffer-name]*.
-
-If there is a process already running in
-*\\[python-shell-buffer-name]*, switch to that buffer.
-
-With argument, allows you to:
-
- * Define DEDICATED so a dedicated process for the current buffer
-   is open.
-
- * Define CMD so you can edit the command used to call the
-interpreter (default is value of `python-shell-interpreter' and
-arguments defined in `python-shell-interpreter-args').
-
-Runs the hook `inferior-python-mode-hook' (after the
-`comint-mode-hook' is run).
-
-\(Type \\[describe-mode] in the process buffer for a list of
-commands.)"
+Input and output via buffer named after
+`python-shell-buffer-name'.  If there is a process already
+running in that buffer, just switch to it.
+With argument, allows you to define DEDICATED, so a dedicated
+process for the current buffer is open, and define CMD so you can
+edit the command used to call the interpreter (default is value
+of `python-shell-interpreter' and arguments defined in
+`python-shell-interpreter-args').  Runs the hook
+`inferior-python-mode-hook' (after the `comint-mode-hook' is
+run).
+\(Type \\[describe-mode] in the process buffer for a list of commands.)"
   (interactive
    (if current-prefix-arg
        (list
@@ -1106,7 +1153,17 @@ commands.)"
         (read-string "Run Python: " (python-shell-parse-command)))
      (list nil (python-shell-parse-command))))
   (let* ((proc-name (python-shell-get-process-name dedicated))
-         (proc-buffer-name (format "*%s*" proc-name)))
+         (proc-buffer-name (format "*%s*" proc-name))
+         (process-environment
+          (if python-shell-process-environment
+              (merge 'list python-shell-process-environment
+                     process-environment 'string=)
+            process-environment))
+         (exec-path
+          (if python-shell-exec-path
+              (merge 'list python-shell-exec-path
+                     exec-path 'string=)
+            exec-path)))
     (when (not (comint-check-proc proc-buffer-name))
       (let ((cmdlist (split-string-and-unquote cmd)))
         (set-buffer
@@ -1170,8 +1227,8 @@ When MSG is non-nil messages the first line of STRING."
 
 (defun python-shell-send-string-no-output (string &optional process msg)
   "Send STRING to PROCESS and inhibit output.
-When MSG is non-nil messages the first line of STRING.
-Return the output."
+When MSG is non-nil messages the first line of STRING.  Return
+the output."
   (let* ((output-buffer)
          (process (or process (python-shell-get-or-create-process)))
          (comint-preoutput-filter-functions
@@ -1256,6 +1313,24 @@ FILE-NAME."
   (interactive)
   (pop-to-buffer (process-buffer (python-shell-get-or-create-process)) t))
 
+(defun python-shell-send-setup-code ()
+  "Send all setup code for shell.
+This function takes the list of setup code to send from the
+`python-shell-setup-codes' list."
+  (let ((msg "Sent %s")
+        (process (get-buffer-process (current-buffer))))
+    (accept-process-output process python-shell-send-setup-max-wait)
+    (dolist (code python-shell-setup-codes)
+      (when code
+        (when (consp code)
+          (setq msg (cdr code)))
+        (message (format msg code))
+        (python-shell-send-string-no-output
+         (symbol-value code) process)))))
+
+(add-hook 'inferior-python-mode-hook
+          #'python-shell-send-setup-code)
+
 
 ;;; Shell completion
 
@@ -1285,16 +1360,6 @@ else:
 (defvar python-shell-completion-string-code
   "';'.join(__COMPLETER_all_completions('''%s'''))\n"
   "Python code used to get a string of completions separated by semicolons.")
-
-(defun python-shell-completion-setup ()
-  "Send `python-shell-completion-setup-code' to inferior Python process.
-It is specially designed to be added to the
-`inferior-python-mode-hook'."
-  (when (> (length python-shell-completion-setup-code) 0)
-    (python-shell-send-string-no-output
-     python-shell-completion-setup-code
-     (get-buffer-process (current-buffer)))
-    (message "Completion setup code sent.")))
 
 (defun python-shell-completion--get-completions (input process)
   "Retrieve available completions for INPUT using PROCESS."
@@ -1340,8 +1405,8 @@ It is specially designed to be added to the
 
 (defun python-shell-completion-complete-or-indent ()
   "Complete or indent depending on the context.
-If content before pointer is all whitespace indent.  If not try to
-complete."
+If content before pointer is all whitespace indent.  If not try
+to complete."
   (interactive)
   (if (string-match "^[[:space:]]*$"
                     (buffer-substring (comint-line-beginning-position)
@@ -1349,20 +1414,16 @@ complete."
       (indent-for-tab-command)
     (comint-dynamic-complete)))
 
-(add-hook 'inferior-python-mode-hook
-          #'python-shell-completion-setup)
-
 
 ;;; PDB Track integration
 
 (defvar python-pdbtrack-stacktrace-info-regexp
   "> %s(\\([0-9]+\\))\\([?a-zA-Z0-9_<>]+\\)()"
-  "Regexp matching stacktrace information.
-It is used to extract the current line and module beign
-inspected.
-The regexp should not start with a caret (^) and can contain a
-string placeholder (\%s) which is replaced with the filename
-beign inspected (so other files in the debugging process are not
+  "Regular Expression matching stacktrace information.
+Used to extract the current line and module beign inspected.  The
+regexp should not start with a caret (^) and can contain a string
+placeholder (\%s) which is replaced with the filename beign
+inspected (so other files in the debugging process are not
 opened)")
 
 (defvar python-pdbtrack-tracking-buffers '()
@@ -1706,17 +1767,6 @@ The skeleton will be bound to python-skeleton-NAME."
   "__FFAP_get_module_path('''%s''')\n"
   "Python code used to get a string with the path of a module.")
 
-(defun python-ffap-setup ()
-  "Send `python-ffap-setup-code' to inferior Python process.
-It is specially designed to be added to the
-`inferior-python-mode-hook'."
-
-  (when (> (length python-ffap-setup-code) 0)
-    (python-shell-send-string-no-output
-     python-ffap-setup-code
-     (get-buffer-process (current-buffer)))
-    (message "FFAP setup code sent.")))
-
 (defun python-ffap-module-path (module)
   "Function for `ffap-alist' to return path for MODULE."
   (let ((process (or
@@ -1735,9 +1785,6 @@ It is specially designed to be added to the
   '(progn
      (push '(python-mode . python-ffap-module-path) ffap-alist)
      (push '(inferior-python-mode . python-ffap-module-path) ffap-alist)))
-
-(add-hook 'inferior-python-mode-hook
-          #'python-ffap-setup)
 
 
 ;;; Code check
@@ -1788,16 +1835,6 @@ Runs COMMAND, a shell command, as if by `compile'.  See
 (defvar python-eldoc-string-code
   "__PYDOC_get_help('''%s''')\n"
   "Python code used to get a string with the documentation of an object.")
-
-(defun python-eldoc-setup ()
-  "Send `python-eldoc-setup-code' to inferior Python process.
-It is specially designed to be added to the
-`inferior-python-mode-hook'."
-  (when (> (length python-eldoc-setup-code) 0)
-    (python-shell-send-string-no-output
-     python-eldoc-setup-code
-     (get-buffer-process (current-buffer)))
-    (message "Eldoc setup code sent.")))
 
 (defun python-eldoc--get-doc-at-point (&optional force-input force-process)
   "Internal implementation to get documentation at point.
@@ -1870,9 +1907,6 @@ Interactively, prompt for symbol."
                (python-eldoc--get-doc-at-point symbol process))
               (help-print-return-message)))))))
 
-(add-hook 'inferior-python-mode-hook
-          #'python-eldoc-setup)
-
 
 ;;; Misc helpers
 
@@ -1897,7 +1931,7 @@ not inside a defun."
       (mapconcat (lambda (string) string) names "."))))
 
 (defun python-info-closing-block ()
-  "Return the point of the block that the current line closes."
+  "Return the point of the block the current line closes."
   (let ((closing-word (save-excursion
                         (back-to-indentation)
                         (current-word)))
@@ -1999,7 +2033,11 @@ character address of the specified TYPE."
 
 ;;;###autoload
 (define-derived-mode python-mode fundamental-mode "Python"
-  "A major mode for editing Python files."
+  "Major mode for editing Python files.
+
+\\{python-mode-map}
+Entry to this mode calls the value of `python-mode-hook'
+if that value is non-nil."
   (set (make-local-variable 'tab-width) 8)
   (set (make-local-variable 'indent-tabs-mode) nil)
 
