@@ -877,11 +877,11 @@ With numeric ARG, just insert that many colons.  With
   :safe 'stringp)
 
 (defvar python-beginning-of-defun-regexp
-  "^\\(def\\|class\\)[[:space:]]+[[:word:]]+"
+  "^\\(def\\|class\\)[[:space:]]+[[:word:]\s_]+"
   "Regular expresion matching beginning of outermost class or function.")
 
 (defvar python-beginning-of-innermost-defun-regexp
-  "^[[:space:]]*\\(def\\|class\\)[[:space:]]+[[:word:]]+"
+  "^[[:space:]]*\\(def\\|class\\)[[:space:]]+[[:word:]\s_]+"
   "Regular expresion matching beginning of innermost class or function.")
 
 (defun python-beginning-of-defun (&optional innermost)
