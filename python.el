@@ -895,6 +895,10 @@ innermost definition."
         (regexp (if innermost
                     python-beginning-of-innermost-defun-regexp
                   python-beginning-of-defun-regexp)))
+    (if (and (not (looking-at regexp))
+             (progn (beginning-of-line) t)
+             (looking-at regexp))
+        (forward-line 1))
     (back-to-indentation)
     (if (and (not (looking-at "@"))
              (not (looking-at regexp)))
@@ -956,9 +960,9 @@ Returns nil if point is not in a def or class."
 		    (forward-line 1)
 		    (not (back-to-indentation))
 		    (looking-at "@")))
-      (while (and (not (bobp))
+      (while (and (not (eobp))
 		  (not (progn (back-to-indentation) (current-word)))
-		  (forward-line -1))))
+		  (forward-line 1))))
     (when (or (not (equal (current-indentation) 0))
               (string-match defun-regexp (current-word)))
       (setq beg-defun-indent (save-excursion
