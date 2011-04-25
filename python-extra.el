@@ -43,6 +43,7 @@
           (newline-and-indent)
           (fill-region string-start-marker
                        string-end-marker
-                       justify))))))
+                       justify))))
+    t))
 
 (provide 'python-extra)
