@@ -1338,7 +1338,7 @@ When argument ARG is non-nil sends the innermost defun."
   (save-excursion
     (python-shell-send-region
      (progn
-       (or (python-beginning-of-defun-function)
+       (or (progn (python-beginning-of-defun-function) (point-marker))
            (progn (beginning-of-line) (point-marker))))
      (progn
        (or (python-end-of-defun-function)
