@@ -1,4 +1,4 @@
-;;; python.el -- Python's flying circus support for Emacs
+;;; python.el --- Python's flying circus support for Emacs
 
 ;; Copyright (C) 2010, 2011 Free Software Foundation, Inc.
 
@@ -35,8 +35,9 @@
 ;; keeping it simple :)
 
 ;; Implements Syntax highlighting, Indentation, Movement, Shell
-;; interaction, Shell completion, Pdb tracking, Symbol completion,
-;; Skeletons, FFAP, Code Check, Eldoc, imenu.
+;; interaction, Shell completion, Shell virtualenv support, Pdb
+;; tracking, Symbol completion, Skeletons, FFAP, Code Check, Eldoc,
+;; imenu.
 
 ;; Syntax highlighting: Fontification of code is provided and supports
 ;; python's triple quoted strings properly.
@@ -84,12 +85,12 @@
 ;; pyreadline from http://ipython.scipy.org/moin/PyReadline/Intro and
 ;; you should be good to go.
 
-;; The shell also contains support for virtualenvs and other special
-;; environment modification thanks to
+;; Shell virtualenv support: The shell also contains support for
+;; virtualenvs and other special environment modifications thanks to
 ;; `python-shell-process-environment' and `python-shell-exec-path'.
 ;; These two variables allows you to modify execution paths and
 ;; enviroment variables to make easy for you to setup virtualenv rules
-;; or behaviors modifications when running shells.  Here is an example
+;; or behavior modifications when running shells.  Here is an example
 ;; of how to make shell processes to be run using the /path/to/env/
 ;; virtualenv:
 
@@ -103,6 +104,15 @@
 ;;                           ":"))
 ;;        "VIRTUAL_ENV=/path/to/env/"))
 ;; (python-shell-exec-path . ("/path/to/env/bin/"))
+
+;; Since the above is cumbersome and can be programatically
+;; calculated, the variable `python-shell-virtualenv-path' is
+;; provided.  When this variable is set with the path of the
+;; virtualenv to use, `process-environment' and `exec-path' get proper
+;; values in order to run shells inside the specified virtualenv.  So
+;; the following will achieve the same as the previous example:
+
+;; (setq python-shell-virtualenv-path "/path/to/env/")
 
 ;; Pdb tracking: when you execute a block of code that contains some
 ;; call to pdb (or ipdb) it will prompt the block of code and will
@@ -159,11 +169,6 @@
 ;; (require 'python)
 
 ;;; TODO:
-
-;; Ordered by priority:
-
-;; Give a better interface for virtualenv support in interactive
-;; shells
 
 ;;; Code:
 
@@ -395,26 +400,15 @@
               (set-match-data nil)))))
      (1 font-lock-variable-name-face nil nil))))
 
-;; Fixme: Is there a better way?
 (defconst python-font-lock-syntactic-keywords
+  ;; Make outer chars of matching triple-quote sequences into generic
+  ;; string delimiters.  Fixme: Is there a better way?
   ;; First avoid a sequence preceded by an odd number of backslashes.
-  `((,(rx (not (any ?\\))
-	  ?\\ (* (and ?\\ ?\\))
-	  (group (syntax string-quote))
-	  (backref 1)
-	  (group (backref 1)))
-     (2 ,(string-to-syntax "\"")))	; dummy
-    (,(rx (group (optional (any "uUrR"))) ; prefix gets syntax property
-	  (optional (any "rR"))		  ; possible second prefix
-	  (group (syntax string-quote))   ; maybe gets property
-	  (backref 2)			  ; per first quote
-	  (group (backref 2)))		  ; maybe gets property
-     (1 (python-quote-syntax 1))
-     (2 (python-quote-syntax 2))
-     (3 (python-quote-syntax 3))))
-  "Make outer chars of triple-quote strings into generic string delimiters.")
+  `((,(concat "\\(?:\\([RUru]\\)[Rr]?\\|^\\|[^\\]\\(?:\\\\.\\)*\\)" ;Prefix.
+            "\\(?:\\('\\)'\\('\\)\\|\\(?2:\"\\)\"\\(?3:\"\\)\\)")
+     (3 (python-quote-syntax)))))
 
-(defun python-quote-syntax (n)
+(defun python-quote-syntax ()
   "Put `syntax-table' property correctly on triple quote.
 Used for syntactic keywords.  N is the match number (1, 2 or 3)."
   ;; Given a triple quote, we have to check the context to know
@@ -432,28 +426,25 @@ Used for syntactic keywords.  N is the match number (1, 2 or 3)."
   ;; x '"""' x """ \"""" x
   (save-excursion
     (goto-char (match-beginning 0))
-    (cond
-     ;; Consider property for the last char if in a fenced string.
-     ((= n 3)
-      (let* ((font-lock-syntactic-keywords nil)
-	     (syntax (syntax-ppss)))
-	(when (eq t (nth 3 syntax))	; after unclosed fence
-	  (goto-char (nth 8 syntax))	; fence position
-	  (skip-chars-forward "uUrR")	; skip any prefix
-	  ;; Is it a matching sequence?
-	  (if (eq (char-after) (char-after (match-beginning 2)))
-	      (eval-when-compile (string-to-syntax "|"))))))
-     ;; Consider property for initial char, accounting for prefixes.
-     ((or (and (= n 2)			; leading quote (not prefix)
-	       (= (match-beginning 1) (match-end 1))) ; prefix is null
-	  (and (= n 1)			; prefix
-	       (/= (match-beginning 1) (match-end 1)))) ; non-empty
-      (let ((font-lock-syntactic-keywords nil))
-	(unless (eq 'string (syntax-ppss-context (syntax-ppss)))
-	  (eval-when-compile (string-to-syntax "|")))))
-     ;; Otherwise (we're in a non-matching string) the property is
-     ;; nil, which is OK.
-     )))
+    (let ((syntax (save-match-data (syntax-ppss))))
+      (cond
+       ((eq t (nth 3 syntax))           ; after unclosed fence
+        ;; Consider property for the last char if in a fenced string.
+        (goto-char (nth 8 syntax))	; fence position
+        (skip-chars-forward "uUrR")	; skip any prefix
+        ;; Is it a matching sequence?
+        (if (eq (char-after) (char-after (match-beginning 2)))
+            (put-text-property (match-beginning 3) (match-end 3)
+                               'syntax-table (string-to-syntax "|"))))
+       ((match-end 1)
+        ;; Consider property for initial char, accounting for prefixes.
+        (put-text-property (match-beginning 1) (match-end 1)
+                           'syntax-table (string-to-syntax "|")))
+       (t
+        ;; Consider property for initial char, accounting for prefixes.
+        (put-text-property (match-beginning 2) (match-end 2)
+                           'syntax-table (string-to-syntax "|"))))
+      )))
 
 (defvar python-mode-syntax-table
   (let ((table (make-syntax-table)))
@@ -1034,6 +1025,9 @@ With negative argument, move backward repeatedly to start of sentence."
   :group 'python
   :safe 'stringp)
 
+(defvar python-shell-internal-buffer-name "Python Internal"
+  "Default buffer name for the Internal Python interpreter.")
+
 (defcustom python-shell-interpreter-args "-i"
   "Default arguments for the Python interpreter."
   :type 'string
@@ -1096,6 +1090,16 @@ default `exec-path'."
   :group 'python
   :safe 'listp)
 
+(defcustom python-shell-virtualenv-path nil
+  "Path to virtualenv root.
+This variable, when set to a string, makes the values stored in
+`python-shell-process-environment' and `python-shell-exec-path'
+to be modified properly so shells are started with the specified
+virtualenv."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
+
 (defcustom python-shell-setup-codes '(python-shell-completion-setup-code
                                       python-ffap-setup-code
                                       python-eldoc-setup-code)
@@ -1140,9 +1144,53 @@ in the `same-window-buffer-names' list."
                                             (format "*%s*" process-name)))
     process-name))
 
+(defun python-shell-internal-get-process-name ()
+  "Calculate the appropiate process name for Internal Python process.
+The name is calculated from `python-shell-global-buffer-name' and
+a hash of all relevant global shell settings in order to ensure
+uniqueness for different types of configurations."
+  (format "%s [%s]"
+          python-shell-internal-buffer-name
+          (md5
+           (concat
+            (python-shell-parse-command)
+            (mapconcat #'symbol-value python-shell-setup-codes "")
+            (mapconcat #'indentity python-shell-process-environment "")
+            (or python-shell-virtualenv-path "")
+            (mapconcat #'indentity python-shell-exec-path "")))))
+
 (defun python-shell-parse-command ()
   "Calculate the string used to execute the inferior Python process."
   (format "%s %s" python-shell-interpreter python-shell-interpreter-args))
+
+(defun python-shell-calculate-process-enviroment ()
+  "Calculate process enviroment given `python-shell-virtualenv-path'."
+  (let ((env (python-util-merge 'list python-shell-process-environment
+                                process-environment 'string=))
+        (virtualenv (if python-shell-virtualenv-path
+                        (directory-file-name python-shell-virtualenv-path)
+                      nil)))
+    (if (not virtualenv)
+        env
+      (dolist (envvar env)
+        (let* ((split (split-string envvar "=" t))
+               (name (nth 0 split))
+               (value (nth 1 split)))
+          (when (not (string= name "PYTHONHOME"))
+            (when (string= name "PATH")
+              (setq value (format "%s/bin:%s" virtualenv value)))
+            (setq env (cons (format "%s=%s" name value) env)))))
+      (cons (format "VIRTUAL_ENV=%s" virtualenv) env))))
+
+(defun python-shell-calculate-exec-path ()
+  "Calculate exec path given `python-shell-virtualenv-path'."
+  (let ((path (python-util-merge 'list python-shell-exec-path
+                                 exec-path 'string=)))
+    (if (not python-shell-virtualenv-path)
+        path
+      (cons (format "%s/bin"
+                    (directory-file-name python-shell-virtualenv-path))
+            path))))
 
 (defun python-comint-output-filter-function (output)
   "Hook run after content is put into comint buffer.
@@ -1217,16 +1265,8 @@ run).
      (list nil (python-shell-parse-command))))
   (let* ((proc-name (python-shell-get-process-name dedicated))
          (proc-buffer-name (format "*%s*" proc-name))
-         (process-environment
-          (if python-shell-process-environment
-              (python-util-merge 'list python-shell-process-environment
-                                 process-environment 'string=)
-            process-environment))
-         (exec-path
-          (if python-shell-exec-path
-              (python-util-merge 'list python-shell-exec-path
-                                 exec-path 'string=)
-            exec-path)))
+         (process-environment (python-shell-calculate-process-enviroment))
+         (exec-path (python-shell-calculate-exec-path)))
     (when (not (comint-check-proc proc-buffer-name))
       (let ((cmdlist (split-string-and-unquote cmd)))
         (set-buffer
@@ -1235,6 +1275,34 @@ run).
         (inferior-python-mode)))
     (pop-to-buffer proc-buffer-name))
   dedicated)
+
+(defun run-python-internal ()
+  "Run an inferior Internal Python process.
+Input and output via buffer named after
+`python-shell-internal-buffer-name' and what
+`python-shell-internal-get-process-name' returns.  This new kind
+of shell is intended to be used for generic communication related
+to defined configurations.  The main difference with global or
+dedicated shells is that these ones are attached to a
+configuration, not a buffer.  This means that can be used for
+example to retrieve the sys.path and other stuff, without messing
+with user shells.  Runs the hook
+`inferior-python-mode-hook' (after the `comint-mode-hook' is
+run).  \(Type \\[describe-mode] in the process buffer for a list
+of commands.)"
+  (interactive)
+  (save-excursion
+    (let* ((cmd (python-shell-parse-command))
+           (proc-name (python-shell-internal-get-process-name))
+           (proc-buffer-name (format "*%s*" proc-name))
+           (process-environment (python-shell-calculate-process-enviroment))
+           (exec-path (python-shell-calculate-exec-path)))
+      (when (not (comint-check-proc proc-buffer-name))
+        (let ((cmdlist (split-string-and-unquote cmd)))
+          (set-buffer
+           (apply 'make-comint proc-name (car cmdlist) nil
+                  (cdr cmdlist)))
+          (inferior-python-mode))))))
 
 (defun python-shell-get-process ()
   "Get inferior Python process for current buffer and return it."
@@ -1267,6 +1335,13 @@ run).
     (get-buffer-process (if dedicated-running
                             dedicated-proc-buffer-name
                           global-proc-buffer-name))))
+
+(defun python-shell-internal-get-or-create-process ()
+  "Get or create an inferior Internal Python process."
+  (let* ((proc-name (python-shell-internal-get-process-name))
+         (proc-buffer-name (format "*%s*" proc-name)))
+    (run-python-internal)
+    (get-buffer-process proc-buffer-name)))
 
 (defun python-shell-send-string (string &optional process msg)
   "Send STRING to inferior Python PROCESS.
@@ -1320,6 +1395,21 @@ the output."
     (mapconcat
      (lambda (string) string)
      (butlast (split-string output-buffer "\n")) "\n")))
+
+(defun python-shell-internal-send-string (string)
+  "Send STRING to the Internal Python interpreter.
+Returns the output.  See `python-shell-send-string-no-output'."
+  (python-shell-send-string-no-output
+   ;; Makes this function compatible with the old
+   ;; python-send-receive. (At least for CEDET).
+   (replace-regexp-in-string "_emacs_out +" "" string)
+   (python-shell-internal-get-or-create-process) nil))
+
+(define-obsolete-function-alias
+  'python-send-receive 'python-shell-internal-send-string "23.3"
+  "Send STRING to inferior Python (if any) and return result.
+The result is what follows `_emacs_out' in the output.
+This is a no-op if `python-check-comint-prompt' returns nil.")
 
 (defun python-shell-send-region (start end)
   "Send the region delimited by START and END to inferior Python process."
