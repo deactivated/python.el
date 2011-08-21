@@ -486,7 +486,8 @@ It makes underscores and dots word constituent chars.")
 (defcustom python-indent-guess-indent-offset t
   "Non-nil tells Python mode to guess `python-indent-offset' value."
   :type 'boolean
-  :group 'python)
+  :group 'python
+  :safe 'booleanp)
 
 (defvar python-indent-current-level 0
   "Current indentation level `python-indent-line-function' is using.")
@@ -572,7 +573,7 @@ START is the buffer position where the sexp starts."
                        (let ((block-regexp (python-rx block-start))
                              (block-start-line-end ":[[:space:]]*$"))
                          (back-to-indentation)
-                         (while (and (forward-comment -9999) (not (bobp))))
+                         (forward-comment -9999)
                          (back-to-indentation)
                          (when (or (python-info-continuation-line-p)
                                    (and (not (looking-at block-regexp))
@@ -595,7 +596,8 @@ START is the buffer position where the sexp starts."
          'after-beginning-of-block)
         ;; After normal line
         ((setq start (save-excursion
-                       (while (and (forward-comment -9999) (not (bobp))))
+                       (back-to-indentation)
+                       (forward-comment -9999)
                        (python-nav-sentence-start)
                        (point-marker)))
          'after-line)
@@ -1016,8 +1018,11 @@ With negative argument, move backward repeatedly to start of sentence."
 
 ;;; Shell integration
 
-(defvar python-shell-buffer-name "Python"
-  "Default buffer name for Python interpreter.")
+(defcustom python-shell-buffer-name "Python"
+  "Default buffer name for Python interpreter."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defcustom python-shell-interpreter "python"
   "Default Python interpreter for shell."
@@ -1025,8 +1030,11 @@ With negative argument, move backward repeatedly to start of sentence."
   :group 'python
   :safe 'stringp)
 
-(defvar python-shell-internal-buffer-name "Python Internal"
-  "Default buffer name for the Internal Python interpreter.")
+(defcustom python-shell-internal-buffer-name "Python Internal"
+  "Default buffer name for the Internal Python interpreter."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defcustom python-shell-interpreter-args "-i"
   "Default arguments for the Python interpreter."
@@ -1048,7 +1056,7 @@ It should not contain a caret (^) at the beginning."
   :group 'python
   :safe 'stringp)
 
-(defcustom python-shell-prompt-output-regexp nil
+(defcustom python-shell-prompt-output-regexp ""
   "Regular Expression matching output prompt of python shell.
 It should not contain a caret (^) at the beginning."
   :type 'string
@@ -1066,9 +1074,9 @@ It should not contain a caret (^) at the beginning."
   "Seconds to wait for process output before code setup.
 If output is received before the especified time then control is
 returned in that moment and not after waiting."
-  :type 'number
+  :type 'integer
   :group 'python
-  :safe 'numberp)
+  :safe 'integerp)
 
 (defcustom python-shell-process-environment nil
   "List of enviroment variables for Python shell.
@@ -1244,6 +1252,65 @@ variable.
     'python-shell-completion-complete-or-indent)
   (compilation-shell-minor-mode 1))
 
+(defun python-shell-make-comint (cmd proc-name &optional pop)
+  "Create a python shell comint buffer.
+CMD is the python command to be executed and PROC-NAME is the
+process name the comint buffer will get.  After the comint buffer
+is created the `inferior-python-mode' is activated.  If POP is
+non-nil the buffer is shown."
+  (save-excursion
+    (let* ((proc-buffer-name (format "*%s*" proc-name))
+           (process-environment (python-shell-calculate-process-enviroment))
+           (exec-path (python-shell-calculate-exec-path)))
+      (when (not (comint-check-proc proc-buffer-name))
+        (let* ((cmdlist (split-string-and-unquote cmd))
+               (buffer (apply 'make-comint proc-name (car cmdlist) nil
+                              (cdr cmdlist)))
+               (python-shell-interpreter-1 python-shell-interpreter)
+               (python-shell-interpreter-args-1 python-shell-interpreter-args)
+               (python-shell-prompt-regexp-1 python-shell-prompt-regexp)
+               (python-shell-prompt-output-regexp-1
+                python-shell-prompt-output-regexp)
+               (python-shell-prompt-block-regexp-1
+                python-shell-prompt-block-regexp)
+               (python-shell-completion-setup-code-1
+                python-shell-completion-setup-code)
+               (python-shell-completion-string-code-1
+                python-shell-completion-string-code)
+               (python-eldoc-setup-code-1 python-eldoc-setup-code)
+               (python-eldoc-string-code-1 python-eldoc-string-code)
+               (python-ffap-setup-code-1 python-ffap-setup-code)
+               (python-ffap-string-code-1 python-ffap-string-code)
+               (python-shell-setup-codes-1 python-shell-setup-codes))
+          (with-current-buffer buffer
+            (inferior-python-mode)
+            (set (make-local-variable 'python-shell-interpreter)
+                 python-shell-interpreter-1)
+            (set (make-local-variable 'python-shell-interpreter-args)
+                 python-shell-interpreter-args-1)
+            (set (make-local-variable 'python-shell-prompt-regexp)
+                 python-shell-prompt-regexp-1)
+            (set (make-local-variable 'python-shell-prompt-output-regexp)
+                 python-shell-prompt-output-regexp-1)
+            (set (make-local-variable 'python-shell-prompt-block-regexp)
+                 python-shell-prompt-block-regexp-1)
+            (set (make-local-variable 'python-shell-completion-setup-code)
+                 python-shell-completion-setup-code-1)
+            (set (make-local-variable 'python-shell-completion-string-code)
+                 python-shell-completion-string-code-1)
+            (set (make-local-variable 'python-eldoc-setup-code)
+                 python-eldoc-setup-code-1)
+            (set (make-local-variable 'python-eldoc-string-code)
+                 python-eldoc-string-code-1)
+            (set (make-local-variable 'python-ffap-setup-code)
+                 python-ffap-setup-code-1)
+            (set (make-local-variable 'python-ffap-string-code)
+                 python-ffap-string-code-1)
+            (set (make-local-variable 'python-shell-setup-codes)
+                 python-shell-setup-codes-1))))
+      (when pop
+        (pop-to-buffer proc-buffer-name)))))
+
 (defun run-python (dedicated cmd)
   "Run an inferior Python process.
 Input and output via buffer named after
@@ -1263,17 +1330,7 @@ run).
         (y-or-n-p "Make dedicated process? ")
         (read-string "Run Python: " (python-shell-parse-command)))
      (list nil (python-shell-parse-command))))
-  (let* ((proc-name (python-shell-get-process-name dedicated))
-         (proc-buffer-name (format "*%s*" proc-name))
-         (process-environment (python-shell-calculate-process-enviroment))
-         (exec-path (python-shell-calculate-exec-path)))
-    (when (not (comint-check-proc proc-buffer-name))
-      (let ((cmdlist (split-string-and-unquote cmd)))
-        (set-buffer
-         (apply 'make-comint proc-name (car cmdlist) nil
-                (cdr cmdlist)))
-        (inferior-python-mode)))
-    (pop-to-buffer proc-buffer-name))
+  (python-shell-make-comint cmd (python-shell-get-process-name dedicated) t)
   dedicated)
 
 (defun run-python-internal ()
@@ -1291,18 +1348,9 @@ with user shells.  Runs the hook
 run).  \(Type \\[describe-mode] in the process buffer for a list
 of commands.)"
   (interactive)
-  (save-excursion
-    (let* ((cmd (python-shell-parse-command))
-           (proc-name (python-shell-internal-get-process-name))
-           (proc-buffer-name (format "*%s*" proc-name))
-           (process-environment (python-shell-calculate-process-enviroment))
-           (exec-path (python-shell-calculate-exec-path)))
-      (when (not (comint-check-proc proc-buffer-name))
-        (let ((cmdlist (split-string-and-unquote cmd)))
-          (set-buffer
-           (apply 'make-comint proc-name (car cmdlist) nil
-                  (cdr cmdlist)))
-          (inferior-python-mode))))))
+  (python-shell-make-comint
+   (python-shell-parse-command)
+   (python-shell-internal-get-process-name)))
 
 (defun python-shell-get-process ()
   "Get inferior Python process for current buffer and return it."
@@ -1486,7 +1534,7 @@ This function takes the list of setup code to send from the
 
 ;;; Shell completion
 
-(defvar python-shell-completion-setup-code
+(defcustom python-shell-completion-setup-code
   "try:
     import readline
 except ImportError:
@@ -1507,11 +1555,17 @@ else:
         except NameError:
             pass
         return completions"
-  "Code used to setup completion in inferior Python processes.")
+  "Code used to setup completion in inferior Python processes."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
-(defvar python-shell-completion-string-code
+(defcustom python-shell-completion-string-code
   "';'.join(__COMPLETER_all_completions('''%s'''))\n"
-  "Python code used to get a string of completions separated by semicolons.")
+  "Python code used to get a string of completions separated by semicolons."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defun python-shell-completion--get-completions (input process)
   "Retrieve available completions for INPUT using PROCESS."
@@ -1569,14 +1623,17 @@ to complete."
 
 ;;; PDB Track integration
 
-(defvar python-pdbtrack-stacktrace-info-regexp
+(defcustom python-pdbtrack-stacktrace-info-regexp
   "> %s(\\([0-9]+\\))\\([?a-zA-Z0-9_<>]+\\)()"
   "Regular Expression matching stacktrace information.
-Used to extract the current line and module beign inspected.  The
+Used to extract the current line and module being inspected.  The
 regexp should not start with a caret (^) and can contain a string
 placeholder (\%s) which is replaced with the filename beign
 inspected (so other files in the debugging process are not
-opened)")
+opened)"
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defvar python-pdbtrack-tracking-buffers '()
   "Alist containing elements of form (#<buffer> . #<buffer>).
@@ -1822,11 +1879,11 @@ JUSTIFY should be used (if applicable) as in `fill-paragraph'."
 This happens when pressing \"if<SPACE>\", for example, to prompt for
 the if condition."
   :type 'boolean
-  :group 'python)
+  :group 'python
+  :safe 'booleanp)
 
 (defvar python-skeleton-available '()
   "Internal list of available skeletons.")
-(make-variable-buffer-local 'inferior-python-mode-current-file)
 
 (define-abbrev-table 'python-mode-abbrev-table ()
   "Abbrev table for Python mode."
@@ -1948,7 +2005,7 @@ The skeleton will be bound to python-skeleton-NAME."
 
 ;;; FFAP
 
-(defvar python-ffap-setup-code
+(defcustom python-ffap-setup-code
   "def __FFAP_get_module_path(module):
     try:
         import os
@@ -1958,11 +2015,17 @@ The skeleton will be bound to python-skeleton-NAME."
         return path
     except:
         return ''"
-  "Python code to get a module path.")
+  "Python code to get a module path."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
-(defvar python-ffap-string-code
+(defcustom python-ffap-string-code
   "__FFAP_get_module_path('''%s''')\n"
-  "Python code used to get a string with the path of a module.")
+  "Python code used to get a string with the path of a module."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defun python-ffap-module-path (module)
   "Function for `ffap-alist' to return path for MODULE."
@@ -1986,9 +2049,12 @@ The skeleton will be bound to python-skeleton-NAME."
 
 ;;; Code check
 
-(defvar python-check-command
+(defcustom python-check-command
   "pychecker --stdlib"
-  "Command used to check a Python file.")
+  "Command used to check a Python file."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defvar python-check-custom-command nil
   "Internal use.")
@@ -2014,7 +2080,7 @@ Runs COMMAND, a shell command, as if by `compile'.  See
 
 ;;; Eldoc
 
-(defvar python-eldoc-setup-code
+(defcustom python-eldoc-setup-code
   "def __PYDOC_get_help(obj):
     try:
         import inspect
@@ -2045,11 +2111,17 @@ Runs COMMAND, a shell command, as if by `compile'.  See
         exec('print doc')
     except SyntaxError:
         print(doc)"
-  "Python code to setup documentation retrieval.")
+  "Python code to setup documentation retrieval."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
-(defvar python-eldoc-string-code
+(defcustom python-eldoc-string-code
   "__PYDOC_get_help('''%s''')\n"
-  "Python code used to get a string with the documentation of an object.")
+  "Python code used to get a string with the documentation of an object."
+  :type 'string
+  :group 'python
+  :safe 'stringp)
 
 (defun python-eldoc--get-doc-at-point (&optional force-input force-process)
   "Internal implementation to get documentation at point.
@@ -2302,22 +2374,29 @@ not inside a defun."
 
 (defun python-info-continuation-line-p ()
   "Return non-nil if current line is continuation of another."
-  (or (python-info-line-ends-backslash-p)
-      (string-match ",[[:space:]]*$" (buffer-substring
-                                      (line-beginning-position)
-                                      (line-end-position)))
-      (save-excursion
-        (let ((innermost-paren (progn
-                                 (goto-char (line-end-position))
-                                 (python-info-ppss-context 'paren))))
-          (when (and innermost-paren
-                     (and (<= (line-beginning-position) innermost-paren)
-                          (>= (line-end-position) innermost-paren)))
-            (goto-char innermost-paren)
-            (looking-at (python-rx open-paren (* space) line-end)))))
-      (save-excursion
-        (back-to-indentation)
-        (python-info-ppss-context 'paren))))
+  (let ((current-ppss-context-type (python-info-ppss-context-type)))
+    (and
+     (equal (save-excursion
+              (goto-char (line-end-position))
+              (forward-comment 9999)
+              (python-info-ppss-context-type))
+            current-ppss-context-type)
+     (or (python-info-line-ends-backslash-p)
+         (string-match ",[[:space:]]*$" (buffer-substring
+                                         (line-beginning-position)
+                                         (line-end-position)))
+         (save-excursion
+           (let ((innermost-paren (progn
+                                    (goto-char (line-end-position))
+                                    (python-info-ppss-context 'paren))))
+             (when (and innermost-paren
+                        (and (<= (line-beginning-position) innermost-paren)
+                             (>= (line-end-position) innermost-paren)))
+               (goto-char innermost-paren)
+               (looking-at (python-rx open-paren (* space) line-end)))))
+         (save-excursion
+           (back-to-indentation)
+           (python-info-ppss-context 'paren))))))
 
 (defun python-info-block-continuation-line-p ()
   "Return non-nil if current line is a continuation of a block."
@@ -2351,7 +2430,7 @@ not inside a defun."
 
 (defun python-info-ppss-context (type &optional syntax-ppss)
   "Return non-nil if point is on TYPE using SYNTAX-PPSS.
-TYPE can be 'comment, 'string or 'parent.  It returns the start
+TYPE can be 'comment, 'string or 'paren.  It returns the start
 character address of the specified TYPE."
   (let ((ppss (or syntax-ppss (syntax-ppss))))
     (case type
@@ -2363,6 +2442,20 @@ character address of the specified TYPE."
       ('paren
        (nth 1 ppss))
       (t nil))))
+
+(defun python-info-ppss-context-type (&optional syntax-ppss)
+  "Return the context type using SYNTAX-PPSS.
+The type returned can be 'comment, 'string or 'paren."
+  (let ((ppss (or syntax-ppss (syntax-ppss))))
+    (cond
+     ((and (nth 4 ppss)
+           (nth 8 ppss))
+      'comment)
+     ((nth 8 ppss)
+      'string)
+     ((nth 1 ppss)
+      'paren)
+     (t nil))))
 
 
 ;;; Utility functions
