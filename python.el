@@ -68,7 +68,7 @@
 ;; `python-shell-completion-string-code'.
 
 ;; Here is a complete example of the settings you would use for
-;; iPython
+;; iPython 0.11:
 
 ;; (setq
 ;;  python-shell-interpreter "ipython"
@@ -77,7 +77,13 @@
 ;;  python-shell-prompt-output-regexp "Out\\[[0-9]+\\]: "
 ;;  python-shell-completion-setup-code ""
 ;;  python-shell-completion-string-code
-;;  "';'.join(__IP.complete('''%s'''))\n")
+;;  "';'.join(get_ipython().Completer.all_completions('''%s'''))\n")
+
+;; For iPython 0.10 everything would be the same except for
+;; `python-shell-completion-string-code':
+
+;; (setq python-shell-completion-string-code
+;;       "';'.join(__IP.complete('''%s'''))\n")
 
 ;; Please note that the default completion system depends on the
 ;; readline module, so if you are using some Operating System that
@@ -89,7 +95,7 @@
 ;; virtualenvs and other special environment modifications thanks to
 ;; `python-shell-process-environment' and `python-shell-exec-path'.
 ;; These two variables allows you to modify execution paths and
-;; enviroment variables to make easy for you to setup virtualenv rules
+;; environment variables to make easy for you to setup virtualenv rules
 ;; or behavior modifications when running shells.  Here is an example
 ;; of how to make shell processes to be run using the /path/to/env/
 ;; virtualenv:
@@ -584,6 +590,7 @@ START is the buffer position where the sexp starts."
                            (while (and (forward-line -1)
                                        (python-info-continuation-line-p)
                                        (not (bobp))))
+                           (back-to-indentation)
                            (when (not (looking-at block-regexp))
                              (forward-line 1)))
                          (back-to-indentation)
@@ -591,7 +598,9 @@ START is the buffer position where the sexp starts."
                                     (or (re-search-forward
                                          block-start-line-end
                                          (line-end-position) t)
-                                        (python-info-continuation-line-p)))
+                                        (save-excursion
+                                          (goto-char (line-end-position))
+                                          (python-info-continuation-line-p))))
                            (point-marker)))))
          'after-beginning-of-block)
         ;; After normal line
@@ -1079,11 +1088,11 @@ returned in that moment and not after waiting."
   :safe 'integerp)
 
 (defcustom python-shell-process-environment nil
-  "List of enviroment variables for Python shell.
-This variable follows the same rules as `process-enviroment'
+  "List of environment variables for Python shell.
+This variable follows the same rules as `process-environment'
 since it merges with it before the process creation routines are
 called.  When this variable is nil, the Python shell is run with
-the default `process-enviroment'."
+the default `process-environment'."
   :type '(repeat string)
   :group 'python
   :safe 'listp)
@@ -1171,8 +1180,8 @@ uniqueness for different types of configurations."
   "Calculate the string used to execute the inferior Python process."
   (format "%s %s" python-shell-interpreter python-shell-interpreter-args))
 
-(defun python-shell-calculate-process-enviroment ()
-  "Calculate process enviroment given `python-shell-virtualenv-path'."
+(defun python-shell-calculate-process-environment ()
+  "Calculate process environment given `python-shell-virtualenv-path'."
   (let ((env (python-util-merge 'list python-shell-process-environment
                                 process-environment 'string=))
         (virtualenv (if python-shell-virtualenv-path
@@ -1260,56 +1269,19 @@ is created the `inferior-python-mode' is activated.  If POP is
 non-nil the buffer is shown."
   (save-excursion
     (let* ((proc-buffer-name (format "*%s*" proc-name))
-           (process-environment (python-shell-calculate-process-enviroment))
+           (process-environment (python-shell-calculate-process-environment))
            (exec-path (python-shell-calculate-exec-path)))
       (when (not (comint-check-proc proc-buffer-name))
         (let* ((cmdlist (split-string-and-unquote cmd))
                (buffer (apply 'make-comint proc-name (car cmdlist) nil
                               (cdr cmdlist)))
-               (python-shell-interpreter-1 python-shell-interpreter)
-               (python-shell-interpreter-args-1 python-shell-interpreter-args)
-               (python-shell-prompt-regexp-1 python-shell-prompt-regexp)
-               (python-shell-prompt-output-regexp-1
-                python-shell-prompt-output-regexp)
-               (python-shell-prompt-block-regexp-1
-                python-shell-prompt-block-regexp)
-               (python-shell-completion-setup-code-1
-                python-shell-completion-setup-code)
-               (python-shell-completion-string-code-1
-                python-shell-completion-string-code)
-               (python-eldoc-setup-code-1 python-eldoc-setup-code)
-               (python-eldoc-string-code-1 python-eldoc-string-code)
-               (python-ffap-setup-code-1 python-ffap-setup-code)
-               (python-ffap-string-code-1 python-ffap-string-code)
-               (python-shell-setup-codes-1 python-shell-setup-codes))
+               (current-buffer (current-buffer)))
           (with-current-buffer buffer
             (inferior-python-mode)
-            (set (make-local-variable 'python-shell-interpreter)
-                 python-shell-interpreter-1)
-            (set (make-local-variable 'python-shell-interpreter-args)
-                 python-shell-interpreter-args-1)
-            (set (make-local-variable 'python-shell-prompt-regexp)
-                 python-shell-prompt-regexp-1)
-            (set (make-local-variable 'python-shell-prompt-output-regexp)
-                 python-shell-prompt-output-regexp-1)
-            (set (make-local-variable 'python-shell-prompt-block-regexp)
-                 python-shell-prompt-block-regexp-1)
-            (set (make-local-variable 'python-shell-completion-setup-code)
-                 python-shell-completion-setup-code-1)
-            (set (make-local-variable 'python-shell-completion-string-code)
-                 python-shell-completion-string-code-1)
-            (set (make-local-variable 'python-eldoc-setup-code)
-                 python-eldoc-setup-code-1)
-            (set (make-local-variable 'python-eldoc-string-code)
-                 python-eldoc-string-code-1)
-            (set (make-local-variable 'python-ffap-setup-code)
-                 python-ffap-setup-code-1)
-            (set (make-local-variable 'python-ffap-string-code)
-                 python-ffap-string-code-1)
-            (set (make-local-variable 'python-shell-setup-codes)
-                 python-shell-setup-codes-1))))
+            (python-util-clone-local-variables current-buffer))))
       (when pop
-        (pop-to-buffer proc-buffer-name)))))
+        (pop-to-buffer proc-buffer-name))
+      proc-buffer-name)))
 
 (defun run-python (dedicated cmd)
   "Run an inferior Python process.
@@ -1348,9 +1320,11 @@ with user shells.  Runs the hook
 run).  \(Type \\[describe-mode] in the process buffer for a list
 of commands.)"
   (interactive)
-  (python-shell-make-comint
-   (python-shell-parse-command)
-   (python-shell-internal-get-process-name)))
+  (set-process-query-on-exit-flag
+   (get-buffer-process
+    (python-shell-make-comint
+     (python-shell-parse-command)
+     (python-shell-internal-get-process-name))) nil))
 
 (defun python-shell-get-process ()
   "Get inferior Python process for current buffer and return it."
@@ -1425,24 +1399,16 @@ the output."
                       "")))))
     (python-shell-send-string string process msg)
     (accept-process-output process)
-    ;; Cleanup output prompt regexp
-    (when (and (not (string= "" output-buffer))
-               (> (length python-shell-prompt-output-regexp) 0))
-      (setq output-buffer
-            (with-temp-buffer
-              (insert output-buffer)
-              (goto-char (point-min))
-              (forward-comment 9999)
-              (buffer-substring-no-properties
-               (or
-                (and (looking-at python-shell-prompt-output-regexp)
-                     (re-search-forward
-                      python-shell-prompt-output-regexp nil t 1))
-                (point-marker))
-               (point-max)))))
     (mapconcat
      (lambda (string) string)
-     (butlast (split-string output-buffer "\n")) "\n")))
+     (split-string
+      output-buffer
+      (if (> (length python-shell-prompt-output-regexp) 0)
+          (format "\n*%s$\\|^%s"
+                  python-shell-prompt-regexp
+                  (or python-shell-prompt-output-regexp ""))
+        (format "\n$\\|^%s"
+                python-shell-prompt-regexp)) t) "\n")))
 
 (defun python-shell-internal-send-string (string)
   "Send STRING to the Internal Python interpreter.
@@ -2479,6 +2445,20 @@ Return the index of the matching item, or nil if not found."
   (let ((member-result (member item seq)))
     (when member-result
       (- (length seq) (length member-result)))))
+
+;; Stolen from org-mode
+(defun python-util-clone-local-variables (from-buffer &optional regexp)
+  "Clone local variables from FROM-BUFFER.
+Optional argument REGEXP selects variables to clone and defaults
+to \"^python-\"."
+  (mapc
+   (lambda (pair)
+     (and (symbolp (car pair))
+          (string-match (or regexp "^python-")
+                        (symbol-name (car pair)))
+	  (set (make-local-variable (car pair))
+	       (cdr pair))))
+   (buffer-local-variables from-buffer)))
 
 
 ;;;###autoload
