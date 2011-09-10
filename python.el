@@ -49,14 +49,16 @@
 ;; causes the current line to be dedented automatically if needed.
 
 ;; Movement: `beginning-of-defun' and `end-of-defun' functions are
-;; properly implemented.  Also there are specialized
+;; properly implemented.  There are also specialized
 ;; `forward-sentence' and `backward-sentence' replacements
 ;; (`python-nav-forward-sentence', `python-nav-backward-sentence'
 ;; respectively).  Extra functions `python-nav-sentence-start' and
 ;; `python-nav-sentence-end' are included to move to the beginning and
 ;; to the end of a setence while taking care of multiline definitions.
+;; `python-nav-jump-to-defun' is provided and allows jumping to a
+;; function or class definition quickly in the current buffer.
 
-;; Shell interaction: is provided and allows you easily execute any
+;; Shell interaction: is provided and allows you to execute easily any
 ;; block of code of your current buffer in an inferior Python process.
 
 ;; Shell completion: hitting tab will try to complete the current
@@ -119,6 +121,10 @@
 ;; the following will achieve the same as the previous example:
 
 ;; (setq python-shell-virtualenv-path "/path/to/env/")
+
+;; Also the `python-shell-extra-pythonpaths' variable have been
+;; introduced as simple way of adding paths to the PYTHONPATH without
+;; affecting existing values.
 
 ;; Pdb tracking: when you execute a block of code that contains some
 ;; call to pdb (or ipdb) it will prompt the block of code and will
@@ -213,6 +219,7 @@
     (substitute-key-definition 'forward-sentence
                                'python-nav-forward-sentence
                                map global-map)
+    (define-key map "\C-c\C-j" 'python-nav-jump-to-defun)
     ;; Indent specific
     (define-key map "\177" 'python-indent-dedent-line-backspace)
     (define-key map (kbd "<backtab>") 'python-indent-dedent-line)
@@ -247,16 +254,17 @@
 	["Shift region right" python-indent-shift-right :active mark-active
 	 :help "Shift region right by a single indentation step"]
 	"-"
-	["Mark def/class" mark-defun
-	 :help "Mark outermost definition around point"]
-	"-"
 	["Start of def/class" beginning-of-defun
 	 :help "Go to start of outermost definition around point"]
 	["End of def/class" end-of-defun
 	 :help "Go to end of definition around point"]
-        "-"
+	["Mark def/class" mark-defun
+	 :help "Mark outermost definition around point"]
+	["Jump to def/class" python-nav-jump-to-defun
+	 :help "Jump to a class or function definition"]
+        "--"
 	("Skeletons")
-        "-"
+        "---"
 	["Start interpreter" run-python
 	 :help "Run inferior Python process in a separate buffer"]
 	["Switch to shell" python-shell-switch-to-shell
@@ -272,7 +280,7 @@
 	["Eval file" python-shell-send-file
 	 :help "Eval file in inferior Python session"]
 	["Debugger" pdb :help "Run pdb under GUD"]
-        "-"
+        "----"
 	["Check file" python-check
 	 :help "Check file for errors"]
 	["Help on symbol" python-eldoc-at-point
@@ -898,7 +906,7 @@ With numeric ARG, just insert that many colons.  With
 
 (defvar python-nav-beginning-of-defun-regexp
   (python-rx line-start (* space) defun (+ space) (group symbol-name))
-  "Regular expresion matching beginning of class or function.
+  "Regexp matching class or function definition.
 The name of the defun should be grouped so it can be retrieved
 via `match-string'.")
 
@@ -1024,6 +1032,51 @@ With negative argument, move backward repeatedly to start of sentence."
     (forward-line -1)
     (setq arg (1+ arg))))
 
+(defun python-nav-list-defun-positions (&optional include-type)
+  "Make an Alist of defun names and point markers for current buffer.
+When optional argument INCLUDE-TYPE is non-nil the type is
+included the defun name."
+  (let ((defs))
+    (save-restriction
+      (widen)
+      (save-excursion
+        (goto-char (point-max))
+        (while (re-search-backward python-nav-beginning-of-defun-regexp nil t)
+          (when (and (not (python-info-ppss-context 'string))
+                     (not (python-info-ppss-context 'comment))
+                     (not (python-info-ppss-context 'parent)))
+            (add-to-list
+             'defs (cons
+                    (python-info-current-defun include-type)
+                    (point-marker)))))
+        defs))))
+
+(defun python-nav-read-defun ()
+  "Read a defun name of current buffer and return its point marker.
+A cons cell with the form (DEFUN-NAME . POINT-MARKER) is returned
+when defun is completed, else nil."
+  (let ((defs (python-nav-list-defun-positions)))
+    (minibuffer-with-setup-hook
+        (lambda ()
+          (setq minibuffer-completion-table (mapcar 'car defs)))
+      (let ((stringdef
+             (read-from-minibuffer
+              "Jump to definition: " nil
+              minibuffer-local-must-match-map)))
+        (when (not (string= stringdef ""))
+          (assoc-string stringdef defs))))))
+
+(defun python-nav-jump-to-defun (def)
+  "Jump to the definition of DEF in current file."
+  (interactive
+   (list (python-nav-read-defun)))
+  (when (not (called-interactively-p 'interactive))
+    (setq def (assoc-string def (python-nav-list-defun-positions))))
+  (let ((def-marker (cdr def)))
+    (when (markerp def-marker)
+      (goto-char (marker-position def-marker))
+      (back-to-indentation))))
+
 
 ;;; Shell integration
 
@@ -1093,6 +1146,14 @@ This variable follows the same rules as `process-environment'
 since it merges with it before the process creation routines are
 called.  When this variable is nil, the Python shell is run with
 the default `process-environment'."
+  :type '(repeat string)
+  :group 'python
+  :safe 'listp)
+
+(defcustom python-shell-extra-pythonpaths nil
+  "List of extra pythonpaths for Python shell.
+The values of this variable are added to the existing value of
+PYTHONPATH in the `process-environment' variable."
   :type '(repeat string)
   :group 'python
   :safe 'listp)
@@ -1182,27 +1243,33 @@ uniqueness for different types of configurations."
 
 (defun python-shell-calculate-process-environment ()
   "Calculate process environment given `python-shell-virtualenv-path'."
-  (let ((env (python-util-merge 'list python-shell-process-environment
-                                process-environment 'string=))
+  (let ((process-environment (append
+                              python-shell-process-environment
+                              process-environment nil))
         (virtualenv (if python-shell-virtualenv-path
                         (directory-file-name python-shell-virtualenv-path)
                       nil)))
+    (when python-shell-extra-pythonpaths
+      (setenv "PYTHONPATH"
+              (format "%s%s%s"
+                      (mapconcat 'identity
+                                 python-shell-extra-pythonpaths
+                                 path-separator)
+                      path-separator
+                      (or (getenv "PYTHONPATH") ""))))
     (if (not virtualenv)
-        env
-      (dolist (envvar env)
-        (let* ((split (split-string envvar "=" t))
-               (name (nth 0 split))
-               (value (nth 1 split)))
-          (when (not (string= name "PYTHONHOME"))
-            (when (string= name "PATH")
-              (setq value (format "%s/bin:%s" virtualenv value)))
-            (setq env (cons (format "%s=%s" name value) env)))))
-      (cons (format "VIRTUAL_ENV=%s" virtualenv) env))))
+        process-environment
+      (setenv "PYTHONHOME" nil)
+      (setenv "PATH" (format "%s/bin%s%s"
+                             virtualenv path-separator
+                             (or (getenv "PATH") "")))
+      (setenv "VIRTUAL_ENV" virtualenv))
+    process-environment))
 
 (defun python-shell-calculate-exec-path ()
   "Calculate exec path given `python-shell-virtualenv-path'."
-  (let ((path (python-util-merge 'list python-shell-exec-path
-                                 exec-path 'string=)))
+  (let ((path (append python-shell-exec-path
+                      exec-path nil)))
     (if (not python-shell-virtualenv-path)
         path
       (cons (format "%s/bin"
@@ -1213,10 +1280,6 @@ uniqueness for different types of configurations."
   "Hook run after content is put into comint buffer.
 OUTPUT is a string with the contents of the buffer."
   (ansi-color-filter-apply output))
-
-(defvar inferior-python-mode-current-file nil
-  "Current file from which a region was sent.")
-(make-variable-buffer-local 'inferior-python-mode-current-file)
 
 (define-derived-mode inferior-python-mode comint-mode "Inferior Python"
   "Major mode for Python inferior process.
@@ -1463,9 +1526,6 @@ FILE-NAME."
          (file-name (or (expand-file-name file-name) temp-file-name)))
     (when (not file-name)
       (error "If FILE-NAME is nil then TEMP-FILE-NAME must be non-nil"))
-    (with-current-buffer (process-buffer process)
-      (setq inferior-python-mode-current-file
-            (convert-standard-filename file-name)))
     (python-shell-send-string
      (format
       (concat "__pyfile = open('''%s''');"
@@ -1533,47 +1593,70 @@ else:
   :group 'python
   :safe 'stringp)
 
-(defun python-shell-completion--get-completions (input process)
-  "Retrieve available completions for INPUT using PROCESS."
+(defcustom python-shell-module-completion-string-code ""
+  "Python code used to get completions separated by semicolons for imports.
+
+For IPython v0.11, add the following line to
+`python-shell-completion-setup-code':
+
+from IPython.core.completerlib import module_completion
+
+and use the following as the value of this variable:
+
+';'.join(module_completion('''%s'''))\n"
+  :type 'string
+  :group 'python
+  :safe 'stringp)
+
+(defun python-shell-completion--get-completions (input process completion-code)
+  "Retrieve available completions for INPUT using PROCESS.
+Argument COMPLETION-CODE is the python code used to get
+completions on the current context."
   (with-current-buffer (process-buffer process)
     (let ((completions (python-shell-send-string-no-output
-                        (format python-shell-completion-string-code input)
-                        process)))
+                        (format completion-code input) process)))
       (when (> (length completions) 2)
         (split-string completions "^'\\|^\"\\|;\\|'$\\|\"$" t)))))
 
-(defun python-shell-completion--get-completion (input completions)
-  "Get completion for INPUT using COMPLETIONS."
-  (let ((completion (when completions
-                      (try-completion input completions))))
-    (cond ((eq completion t)
-           input)
-          ((null completion)
-           (message "Can't find completion for \"%s\"" input)
-           (ding)
-           input)
+(defun python-shell-completion--do-completion-at-point (process)
+  "Do completion at point for PROCESS."
+  (with-syntax-table python-dotty-syntax-table
+    (let* ((line (substring-no-properties
+		  (buffer-substring (point-at-bol) (point)) nil nil))
+	   (input (substring-no-properties
+		   (or (comint-word (current-word)) "") nil nil))
+	   (completions
+	    (if (and (> (length python-shell-module-completion-string-code) 0)
+		     (string-match "^\\(from\\|import\\)[ \t]" line))
+		(python-shell-completion--get-completions
+		 line process python-shell-module-completion-string-code)
+	      (python-shell-completion--get-completions
+	       input process python-shell-completion-string-code)))
+	   (completion (when completions
+			 (try-completion input completions))))
+      (cond ((eq completion t)
+           t)
+	    ((null completion)
+	     (message "Can't find completion for \"%s\"" input)
+	     (ding)
+           nil)
           ((not (string= input completion))
-           completion)
+           (progn (delete-char (- (length input)))
+		  (insert completion)
+		  t))
           (t
-           (message "Making completion list...")
            (with-output-to-temp-buffer "*Python Completions*"
              (display-completion-list
               (all-completions input completions)))
-           input))))
+           t)))))
 
 (defun python-shell-completion-complete-at-point ()
   "Perform completion at point in inferior Python process."
   (interactive)
-  (with-syntax-table python-dotty-syntax-table
-    (when (and comint-last-prompt-overlay
-               (> (point-marker) (overlay-end comint-last-prompt-overlay)))
-      (let* ((process (get-buffer-process (current-buffer)))
-             (input (substring-no-properties
-                     (or (comint-word (current-word)) "") nil nil)))
-        (delete-char (- (length input)))
-        (insert
-         (python-shell-completion--get-completion
-          input (python-shell-completion--get-completions input process)))))))
+  (and comint-last-prompt-overlay
+       (> (point-marker) (overlay-end comint-last-prompt-overlay))
+       (python-shell-completion--do-completion-at-point
+	(get-buffer-process (current-buffer)))))
 
 (defun python-shell-completion-complete-or-indent ()
   "Complete or indent depending on the context.
@@ -1590,81 +1673,77 @@ to complete."
 ;;; PDB Track integration
 
 (defcustom python-pdbtrack-stacktrace-info-regexp
-  "> %s(\\([0-9]+\\))\\([?a-zA-Z0-9_<>]+\\)()"
+  "^> \\([^\"(<]+\\)(\\([0-9]+\\))\\([?a-zA-Z0-9_<>]+\\)()"
   "Regular Expression matching stacktrace information.
-Used to extract the current line and module being inspected.  The
-regexp should not start with a caret (^) and can contain a string
-placeholder (\%s) which is replaced with the filename beign
-inspected (so other files in the debugging process are not
-opened)"
+Used to extract the current line and module being inspected."
   :type 'string
   :group 'python
   :safe 'stringp)
 
-(defvar python-pdbtrack-tracking-buffers '()
+(defvar python-pdbtrack-tracking-buffers nil
   "Alist containing elements of form (#<buffer> . #<buffer>).
 The car of each element of the alist is the tracking buffer and
 the cdr is the tracked buffer.")
 
-(defun python-pdbtrack-get-or-add-tracking-buffers ()
-  "Get/Add a tracked buffer for the current buffer.
+(defun python-pdbtrack-get-or-add-tracking-buffers (file-name)
+  "Get/Add a tracked buffer for the current buffer and FILE-NAME.
 Internally it uses the `python-pdbtrack-tracking-buffers' alist.
 Returns a cons with the form:
  * (#<tracking buffer> . #< tracked buffer>)."
-  (or
-   (assq (current-buffer) python-pdbtrack-tracking-buffers)
-   (let* ((file (with-current-buffer (current-buffer)
-                  inferior-python-mode-current-file))
-          (tracking-buffers
-           `(,(current-buffer) .
-             ,(or (get-file-buffer file)
-                  (find-file-noselect file)))))
-     (set-buffer (cdr tracking-buffers))
-     (python-mode)
-     (set-buffer (car tracking-buffers))
-     (setq python-pdbtrack-tracking-buffers
-           (cons tracking-buffers python-pdbtrack-tracking-buffers))
-     tracking-buffers)))
+  (let ((tracking-buffers
+         (cons (current-buffer)
+               (or (get-file-buffer file-name)
+                   (find-file-noselect file-name)))))
+    (set-buffer (cdr tracking-buffers))
+    (when (not (eq major-mode 'python-mode))
+      (python-mode))
+    (set-buffer (car tracking-buffers))
+    (assq-delete-all (current-buffer) python-pdbtrack-tracking-buffers)
+    (setq python-pdbtrack-tracking-buffers
+          (cons tracking-buffers python-pdbtrack-tracking-buffers))
+    tracking-buffers))
 
 (defun python-pdbtrack-comint-output-filter-function (output)
   "Move overlay arrow to current pdb line in tracked buffer.
 Argument OUTPUT is a string with the output from the comint process."
   (when (not (string= output ""))
-    (let ((full-output (ansi-color-filter-apply
-                        (buffer-substring comint-last-input-end
-                                          (point-max)))))
-      (if (string-match python-shell-prompt-pdb-regexp full-output)
-          (let* ((tracking-buffers (python-pdbtrack-get-or-add-tracking-buffers))
-                 (line-num
-                  (save-excursion
-                    (string-match
-                     (format python-pdbtrack-stacktrace-info-regexp
-                             (regexp-quote
-                              inferior-python-mode-current-file))
-                     full-output)
-                    (string-to-number (or (match-string-no-properties 1 full-output) ""))))
-                 (tracked-buffer-window (get-buffer-window (cdr tracking-buffers)))
+    (let* ((full-output (ansi-color-filter-apply
+                         (buffer-substring comint-last-input-end (point-max))))
+           (line-number)
+           (file-name
+            (with-temp-buffer
+              ;; OK, this sucks but for some reason
+              ;; string-match was not doing his trick.
+              (insert full-output)
+              (goto-char (point-min))
+              (when (looking-at python-pdbtrack-stacktrace-info-regexp)
+                (setq line-number (string-to-number
+                                   (match-string-no-properties 2)))
+                (match-string-no-properties 1)))))
+      (if (and file-name line-number)
+          (let* ((tracking-buffers
+                  (python-pdbtrack-get-or-add-tracking-buffers file-name))
+                 (tracked-buffer-window
+                  (get-buffer-window (cdr tracking-buffers)))
                  (tracked-buffer-line-pos))
-            (when line-num
-              (with-current-buffer (cdr tracking-buffers)
-                (set (make-local-variable 'overlay-arrow-string) "=>")
-                (set (make-local-variable 'overlay-arrow-position) (make-marker))
-                (setq tracked-buffer-line-pos (progn
-                                                (goto-char (point-min))
-                                                (forward-line (1- line-num))
-                                                (point-marker)))
-                (when tracked-buffer-window
-                  (set-window-point tracked-buffer-window tracked-buffer-line-pos))
-                (set-marker overlay-arrow-position tracked-buffer-line-pos)))
+            (with-current-buffer (cdr tracking-buffers)
+              (set (make-local-variable 'overlay-arrow-string) "=>")
+              (set (make-local-variable 'overlay-arrow-position) (make-marker))
+              (setq tracked-buffer-line-pos (progn
+                                              (goto-char (point-min))
+                                              (forward-line (1- line-number))
+                                              (point-marker)))
+              (when tracked-buffer-window
+                (set-window-point
+                 tracked-buffer-window tracked-buffer-line-pos))
+              (set-marker overlay-arrow-position tracked-buffer-line-pos))
             (pop-to-buffer (cdr tracking-buffers))
             (switch-to-buffer-other-window (car tracking-buffers)))
         (let ((tracking-buffers (assq (current-buffer)
                                       python-pdbtrack-tracking-buffers)))
           (when tracking-buffers
-            (if inferior-python-mode-current-file
-                (with-current-buffer (cdr tracking-buffers)
-                  (set-marker overlay-arrow-position nil))
-              (kill-buffer (cdr tracking-buffers)))
+            (with-current-buffer (cdr tracking-buffers)
+              (set-marker overlay-arrow-position nil))
             (setq python-pdbtrack-tracking-buffers
                   (assq-delete-all (current-buffer)
                                    python-pdbtrack-tracking-buffers)))))))
@@ -1682,15 +1761,7 @@ inferior python process is updated properly."
   (let ((process (python-shell-get-process)))
     (if (not process)
         (error "Completion needs an inferior Python process running")
-      (with-syntax-table python-dotty-syntax-table
-        (let* ((input (substring-no-properties
-                       (or (comint-word (current-word)) "") nil nil))
-               (completions (python-shell-completion--get-completions
-                             input process)))
-          (delete-char (- (length input)))
-          (insert
-           (python-shell-completion--get-completion
-            input completions)))))))
+      (python-shell-completion--do-completion-at-point process))))
 
 (add-to-list 'debug-ignored-errors "^Completion needs an inferior Python process running.")
 
@@ -2223,7 +2294,7 @@ Argument PLAIN-INDEX is the calculated plain index used to build the tree."
                                       full-element plain-index))))
 
 (defun python-imenu-make-tree (index)
-"Build the imenu alist tree from plain INDEX.
+  "Build the imenu alist tree from plain INDEX.
 
 The idea of this function is that given the alist:
 
@@ -2249,21 +2320,17 @@ This tree gets built:
 
 Internally it uses `python-imenu-make-element-tree' to create all
 branches for each element."
-(setq python-imenu-index-alist nil)
-(mapc (lambda (element)
-        (python-imenu-make-element-tree element element index))
-      (mapcar (lambda (element)
-              (split-string (car element) "\\." t)) index))
-python-imenu-index-alist)
+  (setq python-imenu-index-alist nil)
+  (mapc (lambda (element)
+          (python-imenu-make-element-tree element element index))
+        (mapcar (lambda (element)
+                  (split-string (car element) "\\." t)) index))
+  python-imenu-index-alist)
 
 (defun python-imenu-create-index ()
   "`imenu-create-index-function' for Python."
-  (let ((index))
-    (goto-char (point-max))
-    (while (python-beginning-of-defun-function 1 t)
-      (let ((defun-dotted-name
-              (python-info-current-defun python-imenu-include-defun-type)))
-        (push (cons defun-dotted-name (point)) index)))
+  (let ((index
+         (python-nav-list-defun-positions python-imenu-include-defun-type)))
     (if python-imenu-make-tree
         (python-imenu-make-tree index)
       index)))
@@ -2425,19 +2492,6 @@ The type returned can be 'comment, 'string or 'paren."
 
 
 ;;; Utility functions
-
-;; Stolen from GNUS
-(defun python-util-merge (type list1 list2 pred)
-  "Destructively merge lists to produce a new one.
-Argument TYPE is for compatibility and ignored.  LIST1 and LIST2
-are the list to be merged.  Ordering of the elements is preserved
-according to PRED, a `less-than' predicate on the elements."
-  (let ((res nil))
-    (while (and list1 list2)
-      (if (funcall pred (car list2) (car list1))
-          (push (pop list2) res)
-        (push (pop list1) res)))
-    (nconc (nreverse res) list1 list2)))
 
 (defun python-util-position (item seq)
   "Find the first occurrence of ITEM in SEQ.
